@@ -9,6 +9,8 @@ class Hatebu
     private $request_token_url = "https://www.hatena.com/oauth/initiate";
     private $access_token_url = 'https://www.hatena.com/oauth/token';
     private $bookmark_api_url = 'http://api.b.hatena.ne.jp/1/my/bookmark';
+    private $oauth_signature_method = 'HMAC-SHA1';
+    private $oauth_version = '1.0';
 
     /**
      * Hatebu constructor.
@@ -27,68 +29,35 @@ class Hatebu
     public function get_request_token()
     {
         $method = 'POST';
-
+        $url = $this->request_token_url;
         $authorization = array(
             'oauth_callback' => "oob",
             'oauth_consumer_key' => $this->oauth_consumer_key,
             'oauth_nonce' => md5(uniqid(rand(), true)),
-            'oauth_signature_method' => "HMAC-SHA1",
+            'oauth_signature_method' => $this->oauth_signature_method,
             'oauth_timestamp' => time(),
-            'oauth_version' => "1.0",
-        );
-        $authorization['oauth_signature'] = $this->create_request_oauth_signature($authorization, $method);
-
-        // request for get token
-        $headers = [
-            sprintf(
-                'Authorization: OAuth realm="",oauth_callback=%s,oauth_consumer_key=%s,oauth_nonce=%s,oauth_signature=%s,oauth_signature_method=%s,oauth_timestamp=%d,oauth_version=%s',
-                $authorization['oauth_callback'],
-                $authorization['oauth_consumer_key'],
-                $authorization['oauth_nonce'],
-                $authorization['oauth_signature'],
-                $authorization['oauth_signature_method'],
-                $authorization['oauth_timestamp'],
-                $authorization['oauth_version']
-            ),
-            'Content-Type: application/x-www-form-urlencoded',
-        ];
-        $context = stream_context_create(
-            array('http' => array(
-                'method' => $method,
-                'header' => implode(PHP_EOL, $headers)
-            ))
+            'oauth_version' => $this->oauth_version,
         );
 
-        $response = file_get_contents($this->request_token_url, false, $context);
+        $body = array(
+            'scope' => 'read_public,write_public,read_private,write_private'
+//            'scope' => 'read_public,write_public'
+        );
+        $authorization['oauth_signature'] = $this->create_signature(
+            $authorization,
+            $method,
+            NULL,
+            $url,
+            $body
+        );
+
+        $response = $this->send_request($url, $authorization, $method, $body);
         $responses = explode("&", $response);
         return array(
             'oauth_token' => rawurldecode(explode("=", $responses[0])[1]),
             'oauth_token_secret' => rawurldecode(explode("=", $responses[1])[1])
         );
     }
-
-    /**
-     * @param $authorization
-     * @param $method
-     * @return string
-     */
-    private function create_request_oauth_signature($authorization, $method)
-    {
-        ksort($authorization);
-        $signatureBaseString = '';
-        foreach ($authorization as $key => $val) {
-            $signatureBaseString .= $key . '=' . rawurlencode($val) . '&';
-        }
-        $signatureBaseString = substr($signatureBaseString, 0, -1);
-        $signatureBaseString =
-            $method
-            . '&' . rawurlencode($this->request_token_url)
-            . '&' . rawurlencode($signatureBaseString);
-        $signingKey = rawurlencode($this->oauth_consumer_secret_key) . '&';;
-
-        return base64_encode(hash_hmac('sha1', $signatureBaseString, $signingKey, true));
-    }
-
 
     /**
      * @param $oauth_request_token
@@ -98,46 +67,24 @@ class Hatebu
      */
     public function get_access_token($oauth_request_token, $oauth_request_token_secret, $oauth_verifier)
     {
+        $method = 'POST';
+        $url = $this->access_token_url;
         $authorization = array(
             'oauth_consumer_key' => $this->oauth_consumer_key,
             'oauth_nonce' => md5(uniqid(rand(), true)),
-            'oauth_signature_method' => "HMAC-SHA1",
+            'oauth_signature_method' => $this->oauth_signature_method,
             'oauth_timestamp' => time(),
             'oauth_token' => $oauth_request_token,
             'oauth_verifier' => $oauth_verifier,
-            'oauth_version' => "1.0"
+            'oauth_version' => $this->oauth_version
         );
-        $authorization['oauth_signature'] = $this->create_access_oauth_signature(
+        $authorization['oauth_signature'] = $this->create_signature(
             $authorization,
-            'POST',
-            $oauth_request_token_secret
+            $method,
+            $oauth_request_token_secret,
+            $url
         );
-        $oauthHeader = 'OAuth ';
-        foreach ($authorization as $key => $val) {
-            $oauthHeader .= $key . '="' . rawurlencode($val) . '",';
-        }
-        $oauthHeader = substr($oauthHeader, 0, -1);
-
-        $curl = curl_init();
-        curl_setopt($curl, CURLOPT_URL, $this->access_token_url);
-        curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 30);
-        curl_setopt($curl, CURLOPT_TIMEOUT, 30);
-        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
-        curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($curl, CURLOPT_HTTPHEADER, array(
-                'Authorization: ' . $oauthHeader,
-                'Content-Length:',
-                'Expect:',
-                'Content-Type:'
-            )
-        );
-        curl_setopt($curl, CURLINFO_HEADER_OUT, true);
-        curl_setopt($curl, CURLOPT_POST, true);
-
-        $response = curl_exec($curl);
-
-        curl_close($curl);
+        $response = $this->send_request($url, $authorization, $method);
         $responses = explode("&", $response);
         return array(
             'oauth_token' => rawurldecode(explode("=", $responses[0])[1]),
@@ -147,81 +94,117 @@ class Hatebu
         );
     }
 
-    /**
-     * @param $authorization
-     * @param $method
-     * @param $oauth_request_token_secret
-     * @return string
-     */
-    private function create_access_oauth_signature($authorization, $method, $oauth_request_token_secret)
-    {
-        ksort($authorization);
-        $signatureBaseString = '';
-        foreach ($authorization as $key => $val) {
-            $signatureBaseString .= $key . '=' . rawurlencode($val) . '&';
-        }
-        $signatureBaseString = substr($signatureBaseString, 0, -1);
-        $signatureBaseString = $method
-            . '&' . rawurlencode($this->access_token_url)
-            . '&' . rawurlencode($signatureBaseString);
-        $signingKey = rawurlencode($this->oauth_consumer_secret_key)
-            . '&' . rawurlencode($oauth_request_token_secret);
 
-        return base64_encode(hash_hmac('sha1', $signatureBaseString, $signingKey, true));
-    }
-
-    public function post_bookmark(String $url, String $comment, String $oauth_access_token, $oauth_access_token_secret)
+    public function post_bookmark(String $bookmark_url, String $comment, String $oauth_access_token, $oauth_access_token_secret)
     {
-        $method = 'GET';
+        $url = $this->bookmark_api_url;
+        $method = 'POST';
         $authorization = array(
             'oauth_consumer_key' => $this->oauth_consumer_key,
             'oauth_nonce' => md5(uniqid(rand(), true)),
-            'oauth_signature_method' => "HMAC-SHA1",
+            'oauth_signature_method' => $this->oauth_signature_method,
             'oauth_timestamp' => time(),
-            'oauth_token' => $oauth_access_token,
-            'oauth_version' => "1.0"
+            'oauth_version' => $this->oauth_version
         );
-        $authorization['oauth_signature'] = $this->create_access_oauth_signature(
+
+        $body = [
+            'url' => $bookmark_url,
+            'comment' => $comment,
+        ];
+        // ここでsignatureにbodyを含めると、認証が通らなくなる
+        $authorization['oauth_signature'] = $this->create_signature(
             $authorization,
             $method,
-            $oauth_access_token_secret
+            $oauth_access_token_secret,
+            $url
         );
+
+        return json_decode(
+            $this->send_request($url, $authorization, $method, $body),
+            true
+        );
+    }
+
+    /**
+     * @param $url
+     * @param $authorization
+     * @param $method
+     * @param $body
+     * @param $additional_headers
+     * @return bool|string
+     */
+    private function send_request($url, $authorization, $method, $body = NULL, $additional_headers = NULL)
+    {
         $oauthHeader = 'OAuth ';
         foreach ($authorization as $key => $val) {
             $oauthHeader .= $key . '="' . rawurlencode($val) . '",';
         }
         $oauthHeader = substr($oauthHeader, 0, -1);
-        $body = array(
-            'url' => $url,
-            'comment' => $comment,
+        $header = array(
+            'Authorization:' . $oauthHeader,
+            'User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:26.0) Gecko/20100101 Firefox/26.0',
+            'Expect:',
         );
-
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_CUSTOMREQUEST, $method);
-        curl_setopt($curl, CURLOPT_HEADER, 1);
-        curl_setopt($curl, CURLOPT_URL, $this->bookmark_api_url);
+        curl_setopt($curl, CURLOPT_URL, $url);
         curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 30);
         curl_setopt($curl, CURLOPT_TIMEOUT, 30);
         curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
         curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($curl, CURLOPT_HTTPHEADER, array(
-            'Authorization :' . $oauthHeader,
-            'Content-Length:',
-            'Content-Type: application/x-www-form-urlencoded'
-        ));
-        curl_setopt($curl, CURLOPT_POSTFIELDS, http_build_query($body));
+        if (isset($additional_headers)) {
+            $header = array_merge($header, $additional_headers);
+        }
+
+        curl_setopt($curl, CURLOPT_HTTPHEADER, $header);
         curl_setopt($curl, CURLINFO_HEADER_OUT, true);
+        if (isset($body)) {
+            curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
+        }
 
-        $response = curl_exec($curl);
-
-        var_dump("RESPONSE\n", $response, "\nFINISHE\n");
-
-        // 出力オプション
-        $info = curl_getinfo($curl);
-        print_r($info);
+        $res = curl_exec($curl);
+        $res_info = curl_getinfo($curl);
+        if ($res_info['http_code'] != 200 && $res_info['http_code'] != 201) {
+            var_dump($res_info);
+            var_dump($res);
+            exit(1);
+        }
 
         curl_close($curl);
+        return $res;
+    }
+
+    /**
+     * @param $authorization
+     * @param $method
+     * @param $token_secret
+     * @param $url
+     * @param null $body
+     * @return string
+     */
+    private function create_signature($authorization, $method, $token_secret, $url, $body = NULL)
+    {
+        if (isset($body)) {
+            $parameter_array = array_merge($authorization, $body);
+        } else {
+            $parameter_array = $authorization;
+        }
+
+        ksort($parameter_array);
+        $signatureBaseString = '';
+        foreach ($parameter_array as $key => $val) {
+            $signatureBaseString .= $key . '=' . rawurlencode($val) . '&';
+        }
+        $signatureBaseString = substr($signatureBaseString, 0, -1);
+        $signatureBaseString = sprintf("%s&%s&%s", $method, rawurlencode($url), rawurlencode($signatureBaseString));
+        if (isset($token_secret)) {
+            $signingKey = sprintf("%s&%s", rawurlencode($this->oauth_consumer_secret_key), rawurlencode($token_secret));
+        } else {
+            $signingKey = rawurlencode($this->oauth_consumer_secret_key) . '&';
+        }
+
+        return base64_encode(hash_hmac('sha1', $signatureBaseString, $signingKey, true));
     }
 }
 
